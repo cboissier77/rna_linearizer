@@ -1,5 +1,6 @@
 # rna_linear_designer.py
 import random
+import re
 from typing import List, Tuple, Dict
 import math
 
@@ -50,12 +51,48 @@ def pu_vector(seq):
 
 def hard_constraint_vector(seq: str, roi_start: int, roi_end: int) -> List[bool]:
     """
-    Return True only if all roi is unpaired.
+    Return True if the RNA sequence does NOT contain unwanted motifs,
+    False otherwise.
     """
-    roi = seq[roi_start : roi_end + 1]
-    fc = RNA.fold_compound(roi)
-    mfe_struct, _ = fc.mfe()
-    return all(c == "." for c in mfe_struct)
+    seq_to_check = seq[roi_start : roi_end + 1]
+
+    # Regex patterns (compiled for efficiency)
+    patterns = {
+        # start codon
+        "start_codon": re.compile(r"AUG"),
+        # stop codons
+        "stop_codon": re.compile(r"UAA|UAG|UGA"),
+        # Homopolymers ≥6
+        "homopolymer": re.compile(r"A{5,}|U{5,}|G{5,}|C{5,}"),
+        # PolyA-like signals
+        "polyA_signal": re.compile(r"AAUAAA|AUUAAA|AAGAAA|AAUAUA|UAUAAA|AAAUA"),
+        # Splice donor (loose)
+        "splice_donor": re.compile(r"[AG]AGG[U][AG]AGU"),
+        # Splice acceptor (loose)
+        "splice_acceptor": re.compile(r"[UC]{8,12}[ACGU]?CAGG"),
+        # AU-rich elements (AREs)
+        "AREs": re.compile(r"(?:AUUUA){2,}"),  # repeated AUUUA motifs
+        # G-quadruplex motif
+        "G4": re.compile(r"G{3,}\w{1,7}G{3,}\w{1,7}G{3,}\w{1,7}G{3,}")
+    }
+
+    # Search each pattern
+    for name, pattern in patterns.items():
+        if pattern.search(seq_to_check):
+            return False
+
+    return True
+
+def check_no_additional_motif(seq: str, motif: str, roi_start: int, roi_end: int, number_motifs: int) -> bool:
+    """
+    Check if the RNA sequence contains the specified number of non-overlapping instances of a motif
+    in the region of interest (ROI).
+    """
+    # Extract the region of interest
+    roi = seq[roi_start:roi_end + 1]
+    # Count non-overlapping occurrences of the motif
+    count = sum(1 for _ in re.finditer(rf"(?={motif})", roi))
+    return count == number_motifs
 
 def score_pu(seq: str, start: int, end: int) -> Tuple[float, List[float]]:
     """
@@ -76,10 +113,13 @@ def mutate_one(seq: str, pos: int, alphabet: Tuple[str, ...] = ("A", "U", "G", "
 def optimize_slice(
     full_seq: str,
     design_mask: List[bool],
+    motif: str,
+    repetition_motif: int,
     roi_start: int,
     roi_end: int,
+    constraint_roi_start: int,
+    constraint_roi_end: int,
     iters: int,
-    rng_seed: int,
     batch_size: int = 10
 ) -> Tuple[str, float]:
     """
@@ -88,7 +128,6 @@ def optimize_slice(
 
     Returns (best_seq, best_mean_pu_in_roi).
     """
-    random.seed(rng_seed)
     if batch_size > sum(design_mask):
         batch_size = sum(design_mask)
     seq = full_seq
@@ -110,13 +149,16 @@ def optimize_slice(
 
         seq = mutate_one(seq, min_pos, alphabet=alphabet)
 
+        while not hard_constraint_vector(seq, constraint_roi_start, constraint_roi_end) or not check_no_additional_motif(seq, motif, constraint_roi_start, constraint_roi_end, repetition_motif):
+            min_pos = random.choice(candidates)[0]
+            seq = mutate_one(seq, min_pos, alphabet=alphabet)
+
     return best_seq, best_score
 
-def initial_fill_from_template(template: str, rng_seed: int) -> str:
+def initial_fill_from_template(template: str) -> str:
     """
     Replace 'N' with random nucleotides (uniform, adjust weights if you want AU bias).
     """
-    random.seed(rng_seed)
     alphabet = ("A", "U", "G", "C")
     return "".join(random.choice(alphabet) if c == "N" else c for c in template)
 
@@ -130,7 +172,6 @@ def staged_optimize_linear_rna(
     padding_front: int = 0,
     padding_end: int = 0,
     iters: int = 5000,
-    seed: int = 0,
 ) -> Dict[str, object]:
     """
     Iterative optimization.
@@ -139,13 +180,19 @@ def staged_optimize_linear_rna(
     template = construct_rna_sequence(
         head, motif, tail, repetition_motif, len_intermotifs, padding_front, padding_end
     )
-    seq = initial_fill_from_template(template, rng_seed=seed)
+
+    seq = initial_fill_from_template(template)
 
     n = len(seq)
     Lh, Lt = len(head), len(tail)
     # ROI: the "linearize" region is the part between head and tail
     roi_start = Lh + padding_front
     roi_end = n - Lt - padding_end - 1
+    constraint_roi_start = Lh
+    constraint_roi_end = n - Lt - 1
+
+    while not hard_constraint_vector(seq, constraint_roi_start, constraint_roi_end) or not check_no_additional_motif(seq, motif, constraint_roi_start, constraint_roi_end, repetition_motif):
+        seq = initial_fill_from_template(template)
 
     design_mask = [c == "N" for c in template]
 
@@ -153,10 +200,13 @@ def staged_optimize_linear_rna(
     seq , _= optimize_slice(
         full_seq=seq,
         design_mask=design_mask,
+        motif=motif,
+        repetition_motif=repetition_motif,
         roi_start=roi_start,
         roi_end=roi_end,
+        constraint_roi_start=constraint_roi_start,
+        constraint_roi_end=constraint_roi_end,
         iters=iters,
-        rng_seed=seed,
     )
 
     # Final evaluation
@@ -172,7 +222,7 @@ def staged_optimize_linear_rna(
         "mfe_structure": mfe_struct,
         "mfe_kcal_per_mol": float(mfe_energy),
         "mean_pu_all": float(mean_pu_all),
-        "linearize_seq": seq[roi_start : roi_end + 1],
+        "linearize_seq": seq[constraint_roi_start : constraint_roi_end + 1],
         "mean_pu_linear": float(mean_pu_linear),
         "min_pu_linear": float(min_pu_linear),
         "roi_start": roi_start,
@@ -202,7 +252,6 @@ with col1:
     padding_front = st.number_input("Padding front (N)", min_value=0, max_value=1000, value=0, step=1)
     padding_end = st.number_input("Padding end (N)", min_value=0, max_value=1000, value=0, step=1)
     iters = st.number_input("Iterations", min_value=10, max_value=1_000_000, value=400, step=10)
-    seed = st.number_input("Random seed", min_value=0, max_value=1_000_000, value=1, step=1)
     run_button = st.button("🚀 Design RNA", type="primary")
 
 with col2:
@@ -240,7 +289,6 @@ with col3:
                     padding_front=padding_front,
                     padding_end=padding_end,
                     iters=int(iters),
-                    seed=int(seed),
                 )
 
             st.success("Design completed!")
