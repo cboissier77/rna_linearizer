@@ -1,6 +1,7 @@
 # rna_linear_designer.py
 import random
 from typing import List, Tuple, Dict
+import math
 
 import streamlit as st
 import RNA  # ViennaRNA python bindings
@@ -47,16 +48,23 @@ def pu_vector(seq):
                 pu[i] -= bpp[j][i+1] 
     return pu
 
-
-
-def score_mean_pu(seq: str, start: int, end: int) -> Tuple[float, List[float]]:
+def hard_constraint_vector(seq: str, roi_start: int, roi_end: int) -> List[bool]:
     """
-    Compute mean PU for a region [start, end] inclusive (0-based) and return (mean, full_pu).
+    Return True only if all roi is unpaired.
+    """
+    roi = seq[roi_start : roi_end + 1]
+    fc = RNA.fold_compound(roi)
+    mfe_struct, _ = fc.mfe()
+    return all(c == "." for c in mfe_struct)
+
+def score_pu(seq: str, start: int, end: int) -> Tuple[float, List[float]]:
+    """
+    Compute sum of log PU in the region of interest (inclusive).
     """
     pu = pu_vector(seq)
     roi = pu[start : end + 1]
-    mean_pu = sum(roi) / max(1, len(roi))
-    return mean_pu, pu
+    sum_log = sum((0.0 if p == 0.0 else math.log(p) for p in roi))
+    return sum_log, pu
 
 
 def mutate_one(seq: str, pos: int, alphabet: Tuple[str, ...] = ("A", "U", "G", "C")) -> str:
@@ -85,13 +93,13 @@ def optimize_slice(
         batch_size = sum(design_mask)
     seq = full_seq
     best_seq = seq
-    best_mean, _ = score_mean_pu(seq, roi_start, roi_end)
+    best_score, _ = score_pu(seq, roi_start, roi_end)
     alphabet = ("A", "U", "G", "C")
 
     for _ in range(max(0, iters)):
-        mean_pu, pu = score_mean_pu(seq, roi_start, roi_end)
-        if mean_pu > best_mean:
-            best_mean, best_seq = mean_pu, seq
+        score, pu = score_pu(seq, roi_start, roi_end)
+        if score > best_score:
+            best_score, best_seq = score, seq
 
         # pick batch size of designable position with lowest PU
         candidates = [(i, pu[i]) for i in range(len(seq)) if design_mask[i]]
@@ -102,8 +110,7 @@ def optimize_slice(
 
         seq = mutate_one(seq, min_pos, alphabet=alphabet)
 
-    return best_seq, best_mean
-
+    return best_seq, best_score
 
 def initial_fill_from_template(template: str, rng_seed: int) -> str:
     """
@@ -137,8 +144,8 @@ def staged_optimize_linear_rna(
     n = len(seq)
     Lh, Lt = len(head), len(tail)
     # ROI: the "linearize" region is the part between head and tail
-    roi_start = Lh
-    roi_end = n - Lt - 1
+    roi_start = Lh + padding_front
+    roi_end = n - Lt - padding_end - 1
 
     design_mask = [c == "N" for c in template]
 
