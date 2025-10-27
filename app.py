@@ -63,9 +63,9 @@ def hard_constraint_vector(seq: str, roi_start: int, roi_end: int) -> List[bool]
         # stop codons
         "stop_codon": re.compile(r"UAA|UAG|UGA"),
         # Homopolymers ≥6
-        "homopolymer": re.compile(r"A{5,}|U{5,}|G{5,}|C{5,}"),
+        "homopolymer": re.compile(r"A{4,}|U{4,}|G{4,}|C{4,}"),
         # PolyA-like signals
-        "polyA_signal": re.compile(r"AAUAAA|AUUAAA|AAGAAA|AAUAUA|UAUAAA|AAAUA"),
+        "polyA_signal": re.compile(r"AAUAAA|AUUAAA|AAGAAA|AAUAUA|UAUAAA|AAAUA|AAGAA"),
         # Splice donor (loose)
         "splice_donor": re.compile(r"[AG]AGG[U][AG]AGU"),
         # Splice acceptor (loose)
@@ -120,7 +120,7 @@ def optimize_slice(
     constraint_roi_start: int,
     constraint_roi_end: int,
     iters: int,
-    batch_size: int = 10
+    batch_size: int = 5
 ) -> Tuple[str, float]:
     """
     Greedy hill-climb: at each step mutate the designable position with the lowest PU.
@@ -134,26 +134,44 @@ def optimize_slice(
     best_seq = seq
     best_score, _ = score_pu(seq, roi_start, roi_end)
     alphabet = ("A", "U", "G", "C")
+    # every 50 muated all
+    mutate_all = 400
+    scores = []
 
-    for _ in range(max(0, iters)):
+
+    for i in range(max(0, iters)):
         score, pu = score_pu(seq, roi_start, roi_end)
+        scores.append(score)
         if score > best_score:
             best_score, best_seq = score, seq
+        if i % mutate_all == 0:
+            # mutate all designable positions once
+            for pos in range(len(seq)):
+                if design_mask[pos]:
+                    seq = mutate_one(seq, pos, alphabet=alphabet)
+            while not hard_constraint_vector(seq, constraint_roi_start,  constraint_roi_end) or not check_no_additional_motif(seq, motif, constraint_roi_start, constraint_roi_end, repetition_motif):
+                for pos in range(len(seq)):
+                    if design_mask[pos]:
+                        seq = mutate_one(seq, pos, alphabet=alphabet)           
 
         # pick batch size of designable position with lowest PU
-        candidates = [(i, pu[i]) for i in range(len(seq)) if design_mask[i]]
-        candidates.sort(key=lambda x: x[1])  # sort by PU
-        candidates = candidates[:batch_size]
-        # select one randomly from the batch
-        min_pos = random.choice(candidates)[0]
+        else:
+            candidates = [(i, pu[i]) for i in range(len(seq)) if design_mask[i]]
+            candidates.sort(key=lambda x: x[1])  # sort by PU
+            candidates = candidates[:batch_size]
+            n_to_mut = random.randint(1, batch_size)
+            # select n_to_mut randomly from the batch
+            candidates = random.sample(candidates, n_to_mut)
+            # select one randomly from the batch
+            #min_pos = random.choice(candidates)[0]
+            for pos, _ in candidates:
+                seq = mutate_one(seq, pos, alphabet=alphabet)
 
-        seq = mutate_one(seq, min_pos, alphabet=alphabet)
+            while not hard_constraint_vector(seq, constraint_roi_start, constraint_roi_end) or not check_no_additional_motif(seq, motif, constraint_roi_start, constraint_roi_end, repetition_motif):
+                min_pos = random.choice(candidates)[0]
+                seq = mutate_one(seq, min_pos, alphabet=alphabet)
 
-        while not hard_constraint_vector(seq, constraint_roi_start, constraint_roi_end) or not check_no_additional_motif(seq, motif, constraint_roi_start, constraint_roi_end, repetition_motif):
-            min_pos = random.choice(candidates)[0]
-            seq = mutate_one(seq, min_pos, alphabet=alphabet)
-
-    return best_seq, best_score
+    return best_seq, best_score, scores
 
 def initial_fill_from_template(template: str) -> str:
     """
@@ -197,7 +215,7 @@ def staged_optimize_linear_rna(
     design_mask = [c == "N" for c in template]
 
     # Optimize this phase on the full sequence (mutations constrained by mask)
-    seq , _= optimize_slice(
+    seq , _, scores = optimize_slice(
         full_seq=seq,
         design_mask=design_mask,
         motif=motif,
@@ -228,6 +246,7 @@ def staged_optimize_linear_rna(
         "roi_start": roi_start,
         "roi_end": roi_end,
         "template": template,
+        "scores": scores,
     }
 
 
@@ -318,3 +337,5 @@ with col3:
 
             st.markdown("### Centroid Structure (Ensemble Average)")
             st.image("centroid_plot.svg")
+            st.markdown("### Optimization Scores")
+            st.line_chart(result["scores"])
