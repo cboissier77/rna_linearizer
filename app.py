@@ -59,9 +59,9 @@ def hard_constraint_vector(seq: str, roi_start: int, roi_end: int) -> List[bool]
     # Regex patterns (compiled for efficiency)
     patterns = {
         # start codon
-        "start_codon": re.compile(r"AUG"),
+        #"start_codon": re.compile(r"AUG"),
         # stop codons
-        "stop_codon": re.compile(r"UAA|UAG|UGA"),
+        #"stop_codon": re.compile(r"UAA|UAG|UGA"),
         # Homopolymers ≥6
         "homopolymer": re.compile(r"A{4,}|U{4,}|G{4,}|C{4,}"),
         # PolyA-like signals
